@@ -5,15 +5,26 @@ from copy import copy
 
 import streamlit as st
 from openpyxl import load_workbook, Workbook
+from openpyxl.cell.cell import MergedCell
 
 
 # ---------- Helpers ----------
 
 def copy_cell(src_cell, dst_cell):
-    """Copy value + formatting from one cell to another."""
+    """Copy value + formatting from one cell to another (safe for merged cells)."""
+    # If destination is a merged cell placeholder, it is read-only -> skip
+    if isinstance(dst_cell, MergedCell):
+        return
+
+    # Source may also be a merged placeholder; it won't contain the value anyway
+    if isinstance(src_cell, MergedCell):
+        return
+
     dst_cell.value = src_cell.value
+
     if src_cell.has_style:
         dst_cell._style = copy(src_cell._style)
+
     dst_cell.number_format = src_cell.number_format
     dst_cell.font = copy(src_cell.font)
     dst_cell.fill = copy(src_cell.fill)
@@ -23,8 +34,8 @@ def copy_cell(src_cell, dst_cell):
     dst_cell.comment = src_cell.comment
 
 
-def copy_sheet_layout(src_ws, dst_ws):
-    """Copy sheet-level layout (best effort)."""
+def copy_sheet_layout_no_merges(src_ws, dst_ws):
+    """Copy sheet-level layout but DO NOT apply merges yet."""
     dst_ws.freeze_panes = src_ws.freeze_panes
     dst_ws.sheet_format = copy(src_ws.sheet_format)
     dst_ws.sheet_properties = copy(src_ws.sheet_properties)
@@ -44,6 +55,9 @@ def copy_sheet_layout(src_ws, dst_ws):
         dst_ws.row_dimensions[r].outlineLevel = dim.outlineLevel
         dst_ws.row_dimensions[r].collapsed = dim.collapsed
 
+
+def apply_merges(src_ws, dst_ws):
+    """Apply merged ranges AFTER values are copied."""
     for merged in list(src_ws.merged_cells.ranges):
         dst_ws.merge_cells(str(merged))
 
@@ -78,20 +92,24 @@ def split_excel_to_xlsx_bytes(
         out_ws = out_wb.active
         out_ws.title = ws.title
 
-        copy_sheet_layout(ws, out_ws)
+        # Copy layout first (NO merges yet)
+        copy_sheet_layout_no_merges(ws, out_ws)
 
-        # Copy header rows
+        # Copy header rows (1..header_rows)
         for r in range(1, header_rows + 1):
             for c in range(1, max_col + 1):
                 copy_cell(ws.cell(row=r, column=c), out_ws.cell(row=r, column=c))
 
-        # Copy data rows
+        # Copy data rows chunk
         out_row = data_start
         for k in range(start_idx, end_idx):
             src_r = data_start + k
             for c in range(1, max_col + 1):
                 copy_cell(ws.cell(row=src_r, column=c), out_ws.cell(row=out_row, column=c))
             out_row += 1
+
+        # NOW apply merges (after values/styles exist)
+        apply_merges(ws, out_ws)
 
         bio = io.BytesIO()
         out_wb.save(bio)
@@ -123,32 +141,10 @@ st.write(
 
 uploaded = st.file_uploader("Upload .xlsx file", type=["xlsx"])
 
-chunk_size = st.number_input(
-    "Data rows per file",
-    min_value=100,
-    max_value=999,
-    value=999,
-    step=1,
-)
-
-header_rows = st.number_input(
-    "Header rows to repeat",
-    min_value=1,
-    max_value=10,
-    value=2,
-    step=1,
-)
-
+chunk_size = st.number_input("Data rows per file", min_value=100, max_value=999, value=999, step=1)
+header_rows = st.number_input("Header rows to repeat", min_value=1, max_value=10, value=2, step=1)
 sheet_name = st.text_input("Sheet name (optional)", value="")
-
-max_col_input = st.number_input(
-    "Max columns to copy (0 = auto)",
-    min_value=0,
-    max_value=500,
-    value=0,
-    step=1,
-)
-
+max_col_input = st.number_input("Max columns to copy (0 = auto)", min_value=0, max_value=500, value=0, step=1)
 max_col_override = None if max_col_input == 0 else int(max_col_input)
 
 if uploaded:
